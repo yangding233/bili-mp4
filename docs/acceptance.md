@@ -4,7 +4,7 @@
 
 首轮记录：[CI 37300220495](https://github.com/yangding233/bili-mp4/actions/runs/37300220495)，提交 `fa4c28889925b9a2abaad795d284200fcda45006`，Python 3.11.9，99 项测试通过，语法检查、源码与打包启动检查及便携包构建成功。后续变更以相应提交的 Actions 结果为准，不能把首轮结果当作新代码的完整验证。
 
-CI 不下载真实 B 站视频，使用解析 mock、本地 HTTP 服务和生成的音视频资源。真实视频、播放器同步及干净 Windows 10/11 需另做人工验收。
+普通 CI 使用解析 mock、本地 HTTP 服务和生成的音视频资源；只有显式 `[live-check]` 提交才执行限定大小与时长的真实 B 站检查。真实播放器同步及干净 Windows 10/11 仍需人工验收。
 
 ## 自动化验收
 
@@ -60,3 +60,17 @@ CI 不下载真实 B 站视频，使用解析 mock、本地 HTTP 服务和生成
 每次验收记录：提交 SHA、构建 ZIP 的 SHA256、Python/Qt/yt-dlp/FFmpeg 版本、操作系统版本、用例、预期与实际结果、通过/失败/未执行、日志位置。
 
 真实视频测试记录 BV 和 P，不保存签名 CDN 地址。自动化 JUnit 报告由 CI 的 windows-test-report 产物提供。正式发布前完成对应二进制的第三方许可与源码材料核对，见 THIRD_PARTY_NOTICES.md。
+
+## 实际执行记录
+
+| 运行 | 提交 | 结果 |
+| --- | --- | --- |
+| [首轮 CI](https://github.com/yangding233/bili-mp4/actions/runs/37300220495) | `fa4c28889925b9a2abaad795d284200fcda45006` | 99 项测试通过，Qt 启动和便携包构建成功 |
+| [离线重合并回归](https://github.com/yangding233/bili-mp4/actions/runs/37300778721) | `8fc8bbd4cda2488958d88e0761271d7dc1af1612` | 100 项测试通过，源码与打包启动检查、便携包构建成功 |
+| [单次实网检查](https://github.com/yangding233/bili-mp4/actions/runs/37302152035) | `2ac7e1c20aa95944740b9d87b8986d15f79bb003` | 100 项离线测试通过；真实 B 站检查失败，原因是限流；Qt 与构建成功 |
+
+实网脚本的原始结果为 `status=failed`、`category=rate_limit`、`temporary_files_removed=true`，消息“B 站暂时限制请求，请稍后重试”。目标为 BV12jup6AEVi 的 P2、720p；未成功取得并验证媒体，因此没有可报告的实际分辨率、下载字节、时长、编码或完整解码成功证据。脚本以退出码 1 结束，但该单独步骤配置了 `continue-on-error`，整体工作流成功不能代替实网成功。未重复请求或尝试绕过访问限制。
+
+实际构建环境为 Windows Server 2022 runner、Python 3.11.9、PySide6 6.11.2、yt-dlp 2026.8.19、FFmpeg 8.1.2。程序下载、封装和恢复的自动化基线已通过；真实视频与干净 Windows 10/11 的剩余人工项目仍按上表记录，不默认通过。
+
+已交付的第二轮便携包 ZIP SHA256：`c66303440d21e70cc3d6b4aa1f1d30516f1376be23e4c2e9e7d32cd6deec5168`。第三轮只增加测试辅助脚本、工作流和说明，没有改变应用程序代码，因此该包对应当前应用实现。

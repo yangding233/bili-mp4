@@ -2,7 +2,7 @@
 
 中文 Windows 桌面软件：粘贴 B 站视频链接，选择分 P 和实际可用格式，下载后无损封装成带声音的 MP4。每个 P 独立输出。
 
-当前版本为 **0.1.0 首版开发版**。首轮 [Windows CI](https://github.com/yangding233/bili-mp4/actions/runs/37300220495) 在提交 `fa4c28889925b9a2abaad795d284200fcda45006` 上通过 **99 项自动化测试**、源码与便携包启动检查，并成功生成便携包。测试包含真实 localhost HTTP 场景及 FFmpeg 本地生成音视频、无损封装和完整解码。尚未执行真实 B 站视频下载及干净 Windows 10/11 人工验收；最新提交状态以 [Actions](https://github.com/yangding233/bili-mp4/actions) 为准，完整标准见 [验收清单](docs/acceptance.md)。
+当前版本为 **0.1.0 首版开发版**。最新 [Windows CI](https://github.com/yangding233/bili-mp4/actions/runs/37302152035) 在提交 `2ac7e1c20aa95944740b9d87b8986d15f79bb003` 上通过 **100 项自动化测试**、源码与便携包启动检查，并成功生成便携包。测试包含真实 localhost HTTP、FFmpeg 本地生成音视频、无损封装、完整解码及离线重合并。单次真实 B 站 P2 检查因站点限流失败，已清理临时目录，不能据此宣称真实视频下载已验证成功；干净 Windows 10/11 人工验收仍待完成。详见 [验收记录](docs/acceptance.md)。
 
 ## 首版功能
 
