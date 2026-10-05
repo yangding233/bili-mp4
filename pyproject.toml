@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bili-mp4"
+version = "0.1.0"
+description = "Windows desktop downloader for accessible Bilibili videos with lossless MP4 muxing."
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = {text = "MIT"}
+authors = [{name = "yangding233"}]
+dependencies = [
+    "PySide6==6.11.2",
+    "yt-dlp==2026.8.19",
+]
+
+[project.urls]
+Repository = "https://github.com/yangding233/bili-mp4"
+Issues = "https://github.com/yangding233/bili-mp4/issues"
+
+[project.gui-scripts]
+bili-mp4 = "bili_mp4.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = [
+    "media: local FFmpeg integration tests, requiring ffmpeg and ffprobe",
+]
