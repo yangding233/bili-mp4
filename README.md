@@ -2,7 +2,7 @@
 
 中文 Windows 桌面软件：粘贴 B 站视频链接，选择分 P 和实际可用格式，下载后无损封装成带声音的 MP4。每个 P 独立输出。
 
-当前版本为 **0.1.0 首版开发版**。源码、自动化测试和 Windows 构建工作流一同提供；当前工作环境未执行 Python、Qt 和 FFmpeg，暂无真实 B 站视频测试结果，因此这里不宣称本机测试、真实下载或干净 Windows 验收已经通过。实际 CI 结果以仓库的 [Actions](https://github.com/yangding233/bili-mp4/actions) 为准，人工验收见 [验收清单](docs/acceptance.md)。
+当前版本为 **0.1.0 首版开发版**。首轮 [Windows CI](https://github.com/yangding233/bili-mp4/actions/runs/37300220495) 在提交 `fa4c28889925b9a2abaad795d284200fcda45006` 上通过 **99 项自动化测试**、源码与便携包启动检查，并成功生成便携包。测试包含真实 localhost HTTP 场景及 FFmpeg 本地生成音视频、无损封装和完整解码。尚未执行真实 B 站视频下载及干净 Windows 10/11 人工验收；最新提交状态以 [Actions](https://github.com/yangding233/bili-mp4/actions) 为准，完整标准见 [验收清单](docs/acceptance.md)。
 
 ## 首版功能
 
@@ -67,7 +67,7 @@ $env:QT_QPA_PLATFORM = "offscreen"
 .\scripts\build_windows.ps1 -FfmpegDirectory $ffmpegBin
 ```
 
-自动化测试使用解析 mock、可控下载器和真实 localhost HTTP 服务，CI 不下载 B 站视频。媒体封装、完整解码和真实播放按验收清单另行验证。Windows 工作流执行语法检查、pytest、源码界面启动检查、PyInstaller 打包，以及打包后的启动检查。界面启动检查不能代替真实下载、音画同步或 Windows 10 人工验收。
+自动化测试使用解析 mock、可控下载器、真实 localhost HTTP 服务，以及 FFmpeg 本地生成的 H.264/AAC 流；验证无损封装、完整解码和提交恢复，CI 不下载 B 站视频。真实播放器的声音、音画同步和 B 站访问仍按验收清单人工验证。Windows 工作流执行语法检查、pytest、源码界面启动检查、PyInstaller 打包，以及打包后的启动检查。界面启动检查不能代替真实下载、音画同步或 Windows 10 人工验收。
 
 构建结果位于 `dist/`，同时生成 ZIP 的 SHA256 文件。构建脚本不会删除原项目或自动清理已有构建；目标 ZIP 已存在时会停止，避免覆盖。
 

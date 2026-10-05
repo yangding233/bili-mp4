@@ -169,7 +169,7 @@ class MainWindow(QMainWindow):
         part_actions.addStretch(1)
         part_actions.addWidget(QLabel("应用到勾选分 P："))
         self.quality_combo = QComboBox()
-        self.quality_combo.addItem("最高可用，优先兼容", None)
+        self.quality_combo.addItem("兼容优先，同编码最高", None)
         for height in (2160, 1440, 1080, 720, 480, 360):
             self.quality_combo.addItem(f"{height}p（需要可用）", height)
         part_actions.addWidget(self.quality_combo)
@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
     def _make_quality_combo(self, choices: list[Any] | None = None,
                             previous: dict[str, Any] | None = None) -> QComboBox:
         combo = QComboBox()
-        combo.addItem("最高可用，优先 H.264 / AAC", {"kind": "auto"})
+        combo.addItem("兼容优先，同编码最高（H.264 / AAC）", {"kind": "auto"})
         for height in (2160, 1440, 1080, 720, 480, 360):
             available = not choices or any(getattr(item, "height", None) == height for item in choices)
             label = f"{height}p" + (" · 当前不可用" if not available else "")

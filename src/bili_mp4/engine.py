@@ -308,6 +308,42 @@ class DownloadManager:
             url=fmt["url"], headers={**(info.get("http_headers") or {}), **(fmt.get("http_headers") or {})},
         )
 
+    def _have_verified_inputs(self, task: Task, directory: Path, ffprobe: str) -> bool:
+        """Reuse complete, task-bound inputs without requiring network access."""
+        ids = [task.choice.video_id] + ([task.choice.audio_id] if task.choice.audio_id else [])
+        for index, format_id in enumerate(ids):
+            self._check_stop()
+            path = directory / ("video.media" if index == 0 else "audio.media")
+            manifest = path.with_name(path.name + ".json")
+            try:
+                meta = json.loads(manifest.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(meta, dict) or meta.get("complete") is not True
+                    or meta.get("key") != f"{task.part.bvid}:{task.part.cid}:{format_id}"
+                    or not path.is_file() or path.stat().st_size != meta.get("size")
+                    or not isinstance(meta.get("sha256"), str)
+                ):
+                    return False
+                verified = digest_file(path, self._stop) == meta["sha256"]
+            except (OSError, ValueError, TypeError):
+                return False
+            if not verified:
+                manifest.unlink(missing_ok=True)
+                return False
+            try:
+                validate_media(
+                    inspect_media(path, ffprobe, self._stop),
+                    video=index == 0, audio=index == 1 or task.choice.audio_id is None,
+                    expected_duration=task.part.duration,
+                    height=task.choice.height if index == 0 else None,
+                )
+            except MediaError:
+                # Invalidate only this stream. A missing tool or user interruption
+                # propagates without invalidating otherwise complete inputs.
+                manifest.unlink(missing_ok=True)
+                return False
+        return True
+
     def _execute(self, task: Task) -> None:
         self._check_stop()
         ffmpeg, ffprobe = find_tools(self.tool_dir)
@@ -316,17 +352,31 @@ class DownloadManager:
         if self._recover_commit(task, directory, ffprobe):
             return
         target = self._output(task)
-        info = self._resolve_selected(task)
-        if task.choice.estimated_bytes:
-            # Separate inputs plus a complete MP4 may coexist until publication.
-            needed = task.choice.estimated_bytes * 2 + 64 * 1024 * 1024
+        ids = [task.choice.video_id] + ([task.choice.audio_id] if task.choice.audio_id else [])
+        have_inputs = self._have_verified_inputs(task, directory, ffprobe)
+        if have_inputs:
+            info = {}
+            counts = {
+                fmt_id: (directory / ("video.media" if index == 0 else "audio.media")).stat().st_size
+                for index, fmt_id in enumerate(ids)
+            }
+            self._set(task, "checking", "已下载输入流校验通过，准备重新封装。")
+        else:
+            info = self._resolve_selected(task)
+            counts = {fmt_id: 0 for fmt_id in ids}
+        if have_inputs or task.choice.estimated_bytes:
+            # Cached inputs already occupy disk; only the new MP4 needs additional
+            # space. Fresh downloads may coexist with another complete MP4.
+            input_bytes = sum(counts.values()) if have_inputs else task.choice.estimated_bytes * 2
+            needed = input_bytes + 64 * 1024 * 1024
             if shutil.disk_usage(task.output_dir).free < needed:
                 raise AppError("磁盘剩余空间不足以同时保存输入流和 MP4。")
         self._check_stop()
-        self._set(task, "downloading", "下载视频流……")
-        ids = [task.choice.video_id] + ([task.choice.audio_id] if task.choice.audio_id else [])
-        counts = {fmt_id: 0 for fmt_id in ids}
-        totals: dict[str, int | None] = {fmt_id: None for fmt_id in ids}
+        if not have_inputs:
+            self._set(task, "downloading", "下载视频流……")
+        totals: dict[str, int | None] = {
+            fmt_id: counts[fmt_id] if have_inputs else None for fmt_id in ids
+        }
         last_update = 0.0
         last_speed = time.monotonic()
         last_bytes = 0
@@ -336,7 +386,7 @@ class DownloadManager:
             task.message = message
             self._publish(task)
 
-        for index, format_id in enumerate(ids):
+        for index, format_id in enumerate([] if have_inputs else ids):
             destination = directory / ("video.media" if index == 0 else "audio.media")
             budget = RetryBudget()
 

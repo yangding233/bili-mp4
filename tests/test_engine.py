@@ -342,3 +342,81 @@ def test_real_manager_closes_loop_and_recovers_commit_without_redownload(
         assert task.status == "completed"
         assert store.load_all()[0].status == "completed"
         assert final.is_file()
+
+
+def test_failed_mux_retries_offline_using_verified_input_cache(
+    tmp_path, tools, input_streams, monkeypatch,
+):
+    from bili_mp4 import engine as engine_module
+
+    video, audio = input_streams
+    choice = sample_choice()
+    resolutions = []
+    downloads = []
+
+    def resolve(part):
+        resolutions.append(part.index)
+        return {
+            "formats": [
+                {"format_id": "video", "url": "https://fixture.invalid/video", "protocol": "https"},
+                {"format_id": "audio", "url": "https://fixture.invalid/audio", "protocol": "https"},
+            ],
+        }, [choice]
+
+    class CopyDownloader:
+        def download(self, resource, destination, stop, progress, notice, budget):
+            identifier = resource.key.rsplit(":", 1)[-1]
+            downloads.append(identifier)
+            source = video if identifier == "video" else audio
+            destination.write_bytes(source.read_bytes())
+            size = destination.stat().st_size
+            atomic_json(destination.with_name(destination.name + ".json"), {
+                "key": resource.key, "complete": True,
+                "size": size, "sha256": digest_file(destination),
+            })
+            progress(size, size)
+            return destination
+
+    with TaskStore(tmp_path / "tasks.sqlite3") as store:
+        fake_resolver = SimpleNamespace(resolve_formats=resolve)
+        downloader = CopyDownloader()
+        manager = DownloadManager(
+            store, lambda _e: None, tool_dir=str(Path(tools[0]).parent),
+            downloader=downloader, resolver_module=fake_resolver,
+        )
+        task = manager.enqueue([(sample_part(), choice)], tmp_path / "output")[0]
+        original_mux = engine_module.mux_mp4
+
+        def fail_mux(*_args, **_kwargs):
+            raise MediaError("模拟一次封装失败")
+
+        monkeypatch.setattr(engine_module, "mux_mp4", fail_mux)
+        with pytest.raises(MediaError, match="封装失败"):
+            manager._execute(task)
+        directory = _workdir(task)
+        assert (directory / "video.media").is_file()
+        assert (directory / "audio.media").is_file()
+        assert (directory / "video.media.json").is_file()
+        assert (directory / "audio.media.json").is_file()
+        assert resolutions == [1]
+        assert downloads == ["video", "audio"]
+
+        def unavailable_network(*_args, **_kwargs):
+            pytest.fail("Re-muxing complete verified inputs must not access the network")
+
+        monkeypatch.setattr(fake_resolver, "resolve_formats", unavailable_network)
+        monkeypatch.setattr(downloader, "download", unavailable_network)
+        monkeypatch.setattr(engine_module, "mux_mp4", original_mux)
+        manager._execute(task)
+        assert task.status == "completed"
+        final = Path(task.output_file)
+        assert final.is_file()
+        validate_media(
+            inspect_media(final, tools[1]), video=True, audio=True,
+            expected_duration=2.0, height=choice.height,
+        )
+        assert (directory / "commit.json").is_file()
+        assert not (directory / "video.media").exists()
+        assert not (directory / "audio.media").exists()
+        assert resolutions == [1]
+        assert downloads == ["video", "audio"]
