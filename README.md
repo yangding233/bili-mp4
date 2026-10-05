@@ -67,7 +67,9 @@ $env:QT_QPA_PLATFORM = "offscreen"
 .\scripts\build_windows.ps1 -FfmpegDirectory $ffmpegBin
 ```
 
-自动化测试使用解析 mock、可控下载器、真实 localhost HTTP 服务，以及 FFmpeg 本地生成的 H.264/AAC 流；验证无损封装、完整解码和提交恢复，CI 不下载 B 站视频。真实播放器的声音、音画同步和 B 站访问仍按验收清单人工验证。Windows 工作流执行语法检查、pytest、源码界面启动检查、PyInstaller 打包，以及打包后的启动检查。界面启动检查不能代替真实下载、音画同步或 Windows 10 人工验收。
+自动化测试使用解析 mock、可控下载器、真实 localhost HTTP 服务，以及 FFmpeg 本地生成的 H.264/AAC 流；验证无损封装、完整解码和提交恢复，普通 CI 不下载 B 站视频。真实播放器的声音、音画同步和 B 站访问仍按验收清单人工验证。Windows 工作流执行语法检查、pytest、源码界面启动检查、PyInstaller 打包，以及打包后的启动检查。界面启动检查不能代替真实下载、音画同步或 Windows 10 人工验收。
+
+开发者可通过提交消息中的 `[live-check]` 标记单次触发 `scripts/check_bilibili.py` 的真实 B 站检查。该步骤使用限定大小和时间的临时输出，不上传媒体，且单独记录结果；站点不可访问或限流造成的失败不会把离线测试与打包判为失败，必须查看该步骤实际日志。普通提交不执行真实视频下载。
 
 构建结果位于 `dist/`，同时生成 ZIP 的 SHA256 文件。构建脚本不会删除原项目或自动清理已有构建；目标 ZIP 已存在时会停止，避免覆盖。
 
