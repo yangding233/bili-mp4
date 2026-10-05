@@ -6,7 +6,7 @@ param(
     [string]$FfmpegDirectory,
     [string]$FfmpegLicenseDirectory,
     [string]$FfmpegSourceUrl = "https://github.com/FFmpeg/FFmpeg/commit/38b88335f9",
-    [string]$Version = "0.1.0"
+    [string]$Version = "0.1.1"
 )
 
 Set-StrictMode -Version Latest
@@ -47,7 +47,7 @@ try {
     & $pythonPath -c "import struct, sys; assert sys.platform == 'win32' and struct.calcsize('P') == 8, 'Windows x64 Python required'"
     if ($LASTEXITCODE -ne 0) { throw "Build requires Windows x64 Python." }
     $pyinstallerArgs = @(
-        "-m", "PyInstaller",
+        (Join-Path $PSScriptRoot "run_pyinstaller.py"),
         "--noconfirm", "--onedir", "--windowed", "--noupx",
         "--name", "BiliMP4",
         "--paths", (Join-Path $projectRoot "src"),

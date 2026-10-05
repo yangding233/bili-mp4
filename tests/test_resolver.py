@@ -1,5 +1,9 @@
+import gzip
+import io
+import json
 import sys
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -48,57 +52,48 @@ def metadata():
     }
 
 
-def flat_playlist():
-    return {
-        "_type": "playlist", "extractor_key": "BiliBili", "id": BV,
-        "entries": [
-            {"_type": "url", "ie_key": "BiliBili", "url": f"{BASE}?p=1"},
-            {"_type": "url", "ie_key": "BiliBili", "url": f"{BASE}?p=2"},
-        ],
-    }
+@pytest.fixture(autouse=True)
+def clear_metadata_cache(monkeypatch):
+    monkeypatch.setattr(resolver, "_METADATA_CACHE", {})
 
 
 def test_parts_lists_one_bv_and_keeps_full_identity(monkeypatch):
     calls = []
-    def extract(url, *, flat):
-        calls.append((url, flat))
-        return flat_playlist()
-    monkeypatch.setattr(resolver, "_extract", extract)
-    monkeypatch.setattr(resolver, "_fetch_metadata", lambda _: metadata())
+    def fetch(bvid):
+        calls.append(bvid)
+        return metadata()
+    monkeypatch.setattr(resolver, "_fetch_metadata", fetch)
+    monkeypatch.setattr(resolver, "_extract", lambda *a, **k: pytest.fail("Listing P must not request playback formats"))
     parts = resolver.resolve_parts(f"{BASE}?p=2")
-    assert calls == [(BASE, True)]
+    assert calls == [BV]
     assert [(p.index, p.cid, p.title) for p in parts] == [
         (1, "101", "第一集"), (2, "102", "第二集"),
     ]
     assert parts[1].url == f"{BASE}?p=2"
 
 
-def test_parts_rejects_playlist_scope_expansion(monkeypatch):
-    info = flat_playlist()
-    info["entries"][1]["url"] = "https://www.bilibili.com/video/BV1bK411W797?p=2"
-    monkeypatch.setattr(resolver, "_extract", lambda *a, **k: info)
-    with pytest.raises(ResolveError, match="其他 BV"):
-        resolver.resolve_parts(BASE)
+def test_page_rejects_video_identity_change():
+    data = metadata()
+    data["bvid"] = "BV1bK411W797"
+    with pytest.raises(ResolveError, match="身份"):
+        resolver._metadata_from_page(page_for(data), BV)
 
 
 def test_parts_rejects_missing_entries(monkeypatch):
-    info = flat_playlist()
-    info["entries"].pop()
-    monkeypatch.setattr(resolver, "_extract", lambda *a, **k: info)
-    monkeypatch.setattr(resolver, "_fetch_metadata", lambda _: metadata())
-    with pytest.raises(ResolveError, match="不一致"):
+    data = metadata()
+    data["pages"] = []
+    monkeypatch.setattr(resolver, "_fetch_metadata", lambda _: data)
+    with pytest.raises(ResolveError, match="分 P"):
         resolver.resolve_parts(BASE)
 
 
-def test_parts_rejects_unsupported_extractor(monkeypatch):
-    info = {"extractor_key": "BiliBiliBangumi", "id": BV}
-    monkeypatch.setattr(resolver, "_extract", lambda *a, **k: info)
-    with pytest.raises(ResolveError, match="内容类型"):
-        resolver.resolve_parts(BASE)
+def test_page_rejects_unsupported_content_type():
+    page = "window.__INITIAL_STATE__=" + json.dumps({"videoInfo": metadata()})
+    with pytest.raises(ResolveError, match="普通 BV"):
+        resolver._metadata_from_page(page, BV)
 
 
 def test_parts_rejects_nonexistent_requested_part(monkeypatch):
-    monkeypatch.setattr(resolver, "_extract", lambda *a, **k: flat_playlist())
     monkeypatch.setattr(resolver, "_fetch_metadata", lambda _: metadata())
     with pytest.raises(InputError, match="不存在"):
         resolver.resolve_parts(f"{BASE}?p=3")
@@ -229,3 +224,117 @@ def test_missing_dependency_is_actionable(monkeypatch):
     monkeypatch.setitem(sys.modules, "yt_dlp", None)
     with pytest.raises(DependencyError, match="yt-dlp"):
         resolver._extract(BASE, flat=True)
+
+
+def page_for(data):
+    return '<script>window.__INITIAL_STATE__ = ' + json.dumps({"videoData": data}, ensure_ascii=False) + '; otherScript();</script>'
+
+
+class PageResponse(io.BytesIO):
+    def __init__(self, body, *, encoding="identity", url=BASE + "/"):
+        super().__init__(body)
+        self.headers = {"Content-Encoding": encoding}
+        self.url = url
+
+    def geturl(self):
+        return self.url
+
+
+@pytest.mark.parametrize("encoding", ["identity", "gzip"])
+def test_public_page_metadata_reads_gzip_and_reuses_bounded_cache(monkeypatch, encoding):
+    data = metadata()
+    data["title"] = '中文标题 with } and "quotes"'
+    data["playurl"] = "https://cdn.invalid/media?token=secret"
+    body = page_for(data).encode("utf-8")
+    if encoding == "gzip":
+        body = gzip.compress(body)
+    calls = []
+    def open_page(request, *, timeout):
+        calls.append(request.full_url)
+        assert request.full_url == BASE + "/"
+        return PageResponse(body, encoding=encoding)
+    monkeypatch.setattr(resolver, "urlopen", open_page)
+    first = resolver._fetch_metadata(BV)
+    first["pages"][0]["cid"] = 999
+    again = resolver._fetch_metadata(BV)
+    assert again["pages"][0]["cid"] == 101
+    assert again["title"] == data["title"]
+    assert "playurl" not in again
+    assert calls == [BASE + "/"]
+    stamp, cached = resolver._METADATA_CACHE[BV]
+    resolver._METADATA_CACHE[BV] = (stamp - resolver._METADATA_TTL - 1, cached)
+    resolver._fetch_metadata(BV)
+    assert calls == [BASE + "/", BASE + "/"]
+
+
+def test_public_page_rejects_redirects_before_reading_metadata(monkeypatch):
+    monkeypatch.setattr(resolver, "urlopen", lambda *a, **k: PageResponse(
+        page_for(metadata()).encode(), url="https://www.bilibili.com/bangumi/play/ep123"))
+    with pytest.raises(ResolveError, match="重定向"):
+        resolver._fetch_metadata(BV)
+
+
+def test_public_page_enforces_decompressed_size_limit(monkeypatch):
+    monkeypatch.setattr(resolver, "_MAX_METADATA_BYTES", 1024)
+    monkeypatch.setattr(resolver, "urlopen", lambda *a, **k: PageResponse(
+        gzip.compress(b"x" * 1025), encoding="gzip"))
+    with pytest.raises(ResolveError, match="过大"):
+        resolver._fetch_metadata(BV)
+
+
+@pytest.mark.parametrize("page, expected", [
+    ("window._riskdata_={}", "请求验证"),
+    ("<html>unexpected page</html>", "结构不兼容"),
+    ("window.__INITIAL_STATE__ = invalid json", "元信息无效"),
+    ('window.__INITIAL_STATE__={"error":{"trueCode":-403}}', "权限"),
+    ('window.__INITIAL_STATE__={"error":{"trueCode":-404}}', "删除"),
+    ('window.__INITIAL_STATE__={"error":{"trueCode":-352}}', "-352"),
+])
+def test_public_page_errors_have_distinct_causes(page, expected):
+    with pytest.raises(ResolveError, match=expected):
+        resolver._metadata_from_page(page, BV)
+
+
+@pytest.mark.parametrize("field, value, expected", [
+    ("is_upower_exclusive", True, "充电"),
+    ("is_preview", True, "完整"),
+    ("has_drm", True, "DRM"),
+    ("rights", {"is_stein_gate": True}, "互动"),
+])
+def test_public_page_still_rejects_unsupported_access(field, value, expected):
+    data = metadata()
+    data[field] = value
+    with pytest.raises(ResolveError, match=expected):
+        resolver._metadata_from_page(page_for(data), BV)
+
+
+@pytest.mark.parametrize("status, expected", [(412, "请求校验"), (429, "过于频繁"), (403, "权限"), (404, "删除")])
+def test_http_failures_are_distinct_and_include_stage(monkeypatch, status, expected):
+    def fail(*args, **kwargs):
+        raise HTTPError("https://cdn.invalid/?token=secret", status, "denied", {}, None)
+    monkeypatch.setattr(resolver, "urlopen", fail)
+    with pytest.raises(ResolveError) as raised:
+        resolver._fetch_metadata(BV)
+    message = str(raised.value)
+    assert expected in message
+    assert f"HTTP {status}" in message
+    assert "获取视频页面" in message
+    assert "token" not in message and "secret" not in message
+    assert BV not in resolver._METADATA_CACHE
+
+
+def test_error_numbers_in_video_ids_or_urls_are_not_http_statuses():
+    error = Exception("[BiliBili] BV1xx412abcd: parsing failed https://cdn.invalid/403?token=secret")
+    assert resolver._http_status(error) is None
+    message = str(resolver._request_failure("播放格式解析", error))
+    assert "权限" not in message and "请求校验" not in message
+    assert "token" not in message and "secret" not in message
+
+
+def test_nested_extractor_http_error_is_preserved():
+    cause = HTTPError("https://cdn.invalid/private", 412, "denied", {}, None)
+    extractor = RuntimeError("wrapped extractor error")
+    extractor.cause = cause
+    outer = RuntimeError("download error")
+    outer.exc_info = (type(extractor), extractor, None)
+    assert resolver._http_status(outer) == 412

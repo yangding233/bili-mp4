@@ -1,4 +1,4 @@
-"""One-off anonymous Bilibili P2 acceptance; never invoked by ordinary pushes.
+"""Bounded anonymous Bilibili acceptance; never invoked by ordinary pushes.
 
 Media stays in an OS temporary directory. Only sanitized result JSON is kept.
 No cookies, credentials, signed playback URLs, or downloaded media are printed.
@@ -134,7 +134,9 @@ def failure_category(exc: BaseException, deadline: Deadline) -> str:
     text = str(exc)
     if "下载上限" in text or "媒体长度" in text:
         return "download_limit"
-    if "限制请求" in text or "限流" in text:
+    if "HTTP 412" in text or "拒绝当前请求" in text or "请求验证" in text:
+        return "request_rejected"
+    if "限制请求" in text or "限流" in text or "过于频繁" in text:
         return "rate_limit"
     if any(word in text for word in ("权限", "试看", "不可访问", "已删除")):
         return "access"
@@ -147,13 +149,16 @@ def failure_category(exc: BaseException, deadline: Deadline) -> str:
     return "application"
 
 
-def run_check() -> dict:
+def run_check(bvid: str = EXAMPLE_BVID, part_index: int = 2, height: int = 720) -> dict:
+    normalized = resolver.normalize_url(bvid)
+    if normalized != f"https://www.bilibili.com/video/{bvid}" or part_index < 1 or height < 1:
+        raise ValueError("A BV identifier, positive part and exact pixel height are required")
     deadline = Deadline()
     directory = Path(tempfile.mkdtemp(prefix="bili-mp4-live-check-"))
     store = None
     manager = None
     timer = None
-    result = {"status": "failed", "bvid": EXAMPLE_BVID, "part": 2}
+    result = {"status": "failed", "bvid": bvid, "part": part_index}
     try:
         store = TaskStore(directory / "tasks.sqlite3")
         downloader = BoundedDownloader(deadline)
@@ -162,16 +167,15 @@ def run_check() -> dict:
         timer = threading.Timer(deadline.remaining(), deadline.stop.set)
         timer.daemon = True
         timer.start()
-        parts = resolver.resolve_parts(EXAMPLE_URL)
+        parts = resolver.resolve_parts(f"{normalized}?p={part_index}")
         deadline.check()
-        part = next((item for item in parts if item.index == 2), None)
+        part = next((item for item in parts if item.index == part_index), None)
         if (
-            part is None or part.bvid != EXAMPLE_BVID or int(part.cid) <= 0
-            or not any(item.index == 1 and item.bvid == EXAMPLE_BVID for item in parts)
+            part is None or part.bvid != bvid or int(part.cid) <= 0
         ):
-            raise AppError("示例视频未返回有效的 P1/P2 元信息")
+            raise AppError("示例视频未返回有效的所选分 P 元信息")
         _info, choices = resolver.resolve_formats(part)
-        choice = resolver.select_choice(choices, height=720)
+        choice = resolver.select_choice(choices, height=height)
         deadline.check()
         task = manager.enqueue([(part, choice)], directory / "media")[0]
         manager.start()
@@ -189,7 +193,7 @@ def run_check() -> dict:
         probe = inspect_media(final, ffprobe, deadline.stop)
         validate_media(
             probe, video=True, audio=True, expected_duration=part.duration,
-            height=720,
+            height=height,
         )
         decode = subprocess.run(
             [ffmpeg, "-v", "error", "-nostdin", "-xerror", "-i", str(final),
@@ -259,10 +263,13 @@ def run_check() -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="一次性匿名 P2 实网验收，媒体不上传")
+    parser = argparse.ArgumentParser(description="一次性匿名实网验收，32 MiB/5分钟上限，媒体不上传")
+    parser.add_argument("--bvid", default=EXAMPLE_BVID)
+    parser.add_argument("--part", type=int, default=2)
+    parser.add_argument("--height", type=int, default=720, help="Exact stored pixel height, including portrait videos")
     parser.add_argument("--result-file", type=Path, default=Path("build/live-check.json"))
     args = parser.parse_args()
-    result = run_check()
+    result = run_check(args.bvid, args.part, args.height)
     encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
     args.result_file.parent.mkdir(parents=True, exist_ok=True)
     args.result_file.write_text(encoded + "\n", encoding="utf-8")

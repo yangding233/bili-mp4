@@ -2,7 +2,9 @@
 
 中文 Windows 桌面软件：粘贴 B 站视频链接，选择分 P 和实际可用格式，下载后无损封装成带声音的 MP4。每个 P 独立输出。
 
-当前版本为 **0.1.0 首版开发版**。最新 [Windows CI](https://github.com/yangding233/bili-mp4/actions/runs/37302152035) 在提交 `2ac7e1c20aa95944740b9d87b8986d15f79bb003` 上通过 **100 项自动化测试**、源码与便携包启动检查，并成功生成便携包。测试包含真实 localhost HTTP、FFmpeg 本地生成音视频、无损封装、完整解码及离线重合并。单次真实 B 站 P2 检查因站点限流失败，已清理临时目录，不能据此宣称真实视频下载已验证成功；干净 Windows 10/11 人工验收仍待完成。详见 [验收记录](docs/acceptance.md)。
+当前版本为 **0.1.1 修复开发版**。修复了“网页可访问，但额外元信息 API 返回 HTTP 412，导致整个解析失败”的问题：分 P、CID 和完整时长现在来自普通视频页面；格式仍由 yt-dlp 解析，短期复用公开元信息以减少重复请求。HTTP 412 请求拒绝、429 请求过频和页面结构异常分别提示失败阶段与原因。
+
+2026-10-06 在 Windows 11、Python 3.14.4 上通过 **124 项自动化测试**及打包 EXE 启动检查。用户提供的 `BV1BLA2eFEoC` P1 已实际完成匿名下载、无损封装、音视频结构检查和完整解码：H.264/AAC，实际像素高度 640，时长 264.428617 秒。该样本成功不代表所有视频、画质、网络或恢复场景均已验收；干净 Windows 10/11、播放器同步及实网恢复仍按 [验收记录](docs/acceptance.md) 跟踪。
 
 ## 首版功能
 
@@ -33,7 +35,7 @@
 
 本项目目前通过 GitHub Actions 构建测试包，**不预先承诺已有正式 Release**。
 
-打开 [Actions](https://github.com/yangding233/bili-mp4/actions)，选择成功的“Windows checks and portable build”，下载 `BiliMP4-windows-x64` 产物。下载 Actions 产物通常需要登录 GitHub。解开产物中的 ZIP，再完整解压 `BiliMP4-0.1.0-windows-x64.zip`，运行 `BiliMP4/BiliMP4.exe`。
+打开 [Actions](https://github.com/yangding233/bili-mp4/actions)，选择对应 0.1.1 修复提交的成功“Windows checks and portable build”，下载 `BiliMP4-windows-x64` 产物。下载 Actions 产物通常需要登录 GitHub。解开产物中的 ZIP，再完整解压 `BiliMP4-0.1.1-windows-x64.zip`，运行 `BiliMP4/BiliMP4.exe`。窗口标题显示 v0.1.1，可用于确认启动的是修复版。
 
 不要只复制 EXE；`_internal`、内置工具和许可文件必须一起保留。便携包由构建脚本纳入 Python、Qt、yt-dlp、FFmpeg/ffprobe，目标是不要求用户自行安装运行依赖。Windows 10/11 x64 的完整人工验收仍以验收记录为准。
 
@@ -71,7 +73,13 @@ $env:QT_QPA_PLATFORM = "offscreen"
 
 开发者可通过提交消息中的 `[live-check]` 标记单次触发 `scripts/check_bilibili.py` 的真实 B 站检查。该步骤使用限定大小和时间的临时输出，不上传媒体，且单独记录结果；站点不可访问或限流造成的失败不会把离线测试与打包判为失败，必须查看该步骤实际日志。普通提交不执行真实视频下载。
 
+可在已有开发环境中单独验证指定样本，例如 `python scripts/check_bilibili.py --bvid BV1BLA2eFEoC --part 1 --height 640`。`--height` 是视频实际存储像素高度，竖屏视频可能不是常见的 720/1080；脚本限制媒体读取量为 32 MiB、总时限为 5 分钟，完整解码成功才返回成功，并清理临时媒体。
+
+如果仍报错，请查看“导出诊断日志”中的失败阶段和状态码：HTTP 412 表示该请求被拒绝，不能承诺等待后必然恢复；HTTP 429 表示请求过于频繁，应暂停操作；页面结构不兼容需要更新解析组件。不要反复点击解析来测试是否恢复。
+
 构建结果位于 `dist/`，同时生成 ZIP 的 SHA256 文件。构建脚本不会删除原项目或自动清理已有构建；目标 ZIP 已存在时会停止，避免覆盖。
+
+构建脚本通过 `scripts/run_pyinstaller.py` 在 Python 进程内部隔离原生 DLL 搜索路径，避免把 Poppler/Conda 的同名 ICU 动态库打入 Qt 应用。该设置只作用于构建进程，不修改系统 PATH。
 
 ## 技术结构
 

@@ -1,17 +1,21 @@
 """Resolve ordinary, anonymously accessible Bilibili BV videos.
 
-yt-dlp owns extraction. Public view metadata supplies CID and expected full
-duration, which yt-dlp's flat anthology entries currently do not expose.
+yt-dlp owns format extraction. The public video page supplies CID and expected
+full duration; the extra view API can reject requests even when the page works.
 Extraction dictionaries (including expiring media URLs) stay in memory.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import re
+import threading
+import time
+from copy import deepcopy
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
 from .domain import (
@@ -24,6 +28,59 @@ _PATH_RE = re.compile(r"/video/(BV[0-9A-Za-z]{10})/?\Z")
 _ALLOWED_EXTRACTORS = {"bilibili"}
 _TIMEOUT = 20
 _MAX_METADATA_BYTES = 4 * 1024 * 1024
+_METADATA_TTL = 30
+_METADATA_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_METADATA_LOCK = threading.Lock()
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """Read structured causes first; never interpret numbers in a BV/URL."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending and len(seen) < 12:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, HTTPError):
+            return current.code
+        if type(current).__name__ == "HTTPError":
+            status = getattr(current, "status", None)
+            if isinstance(status, int) and 100 <= status <= 599:
+                return status
+        for field in ("cause", "__cause__", "__context__"):
+            cause = getattr(current, field, None)
+            if isinstance(cause, BaseException):
+                pending.append(cause)
+        info = getattr(current, "exc_info", None)
+        if isinstance(info, tuple) and len(info) > 1 and isinstance(info[1], BaseException):
+            pending.append(info[1])
+    text = re.sub(r"https?://\S+", "[URL]", str(exc), flags=re.I)
+    match = re.search(r"\bHTTP(?:\s+Error)?\s*[:=]?\s*(\d{3})\b", text, re.I)
+    return int(match.group(1)) if match else None
+
+
+def _request_failure(stage: str, exc: BaseException) -> ResolveError:
+    status = _http_status(exc)
+    context = f"{stage}，HTTP {status}" if status else stage
+    if status == 412:
+        return ResolveError(
+            f"B 站拒绝当前请求（{context}）。请求校验未通过；持续出现时需要检查解析组件，反复重试不保证恢复。"
+        )
+    if status == 429:
+        return ResolveError(f"B 站请求过于频繁（{context}），请暂停操作，等待后再重试。")
+    if status in (401, 403):
+        return ResolveError(f"当前匿名访问权限不足（{context}），不能下载此内容。")
+    if status == 404:
+        return ResolveError(f"视频已删除或不可访问（{context}）。")
+    text = re.sub(r"https?://\S+", "[URL]", str(exc), flags=re.I).lower()
+    if "rate limit" in text or re.search(r"(?<!\d)-352(?!\d)", text):
+        return ResolveError(f"B 站拦截了当前请求（{context}，解析器报告请求限制），不能确定等待多久能恢复。")
+    if any(word in text for word in ("login", "premium", "supporter", "permission")):
+        return ResolveError(f"当前匿名访问权限不足（{context}），不能下载此内容。")
+    if any(word in text for word in ("deleted", "geo-restricted")):
+        return ResolveError(f"视频已删除、受区域限制或不可访问（{context}）。")
+    return ResolveError(f"{context}失败，请检查网络或解析组件版本；原始网络地址未写入日志。")
 
 
 def normalize_url(value: str) -> str:
@@ -119,14 +176,7 @@ def _extract(url: str, *, flat: bool) -> dict[str, Any]:
     except Exception as exc:
         # Extractor messages may contain signed media URLs. Keep them out of
         # task records and show an actionable category instead.
-        text = str(exc).lower()
-        if any(word in text for word in ("login", "premium", "supporter", "403", "permission")):
-            raise ResolveError("当前匿名访问权限不足，不能下载此内容") from exc
-        if any(word in text for word in ("429", "rate limit", "412", "-352")):
-            raise ResolveError("B 站暂时限制请求，请稍后重试") from exc
-        if any(word in text for word in ("404", "deleted", "geo-restricted")):
-            raise ResolveError("视频已删除、受区域限制或不可访问") from exc
-        raise ResolveError("播放信息解析失败，请检查网络或更新 yt-dlp 后重试") from exc
+        raise _request_failure("播放格式解析", exc) from exc
     if not isinstance(info, dict):
         raise ResolveError("解析器未返回可用的视频信息")
     if logger.preview_seen:
@@ -148,49 +198,96 @@ def _check_extractor(info: dict[str, Any]) -> None:
         raise ResolveError("当前权限不足或仅提供试看内容")
 
 
-def _fetch_metadata(bvid: str) -> dict[str, Any]:
-    """Read ordinary public metadata; never request playback permissions."""
-    endpoint = "https://api.bilibili.com/x/web-interface/view?" + urlencode({"bvid": bvid})
-    request = Request(endpoint, headers={
-        "User-Agent": "Mozilla/5.0",
-        "Referer": f"https://www.bilibili.com/video/{bvid}",
-        "Accept": "application/json",
-    })
+def _metadata_from_page(page: str, bvid: str) -> dict[str, Any]:
+    marker = re.search(r"window\.__INITIAL_STATE__\s*=\s*", page)
+    if marker is None:
+        if re.search(r"\bwindow\._riskdata_\s*=", page):
+            raise ResolveError("B 站返回了请求验证页面（视频元信息解析），当前匿名请求未通过校验。")
+        raise ResolveError("视频页面结构不兼容（视频元信息解析），请更新解析组件。")
     try:
-        with urlopen(request, timeout=_TIMEOUT) as response:
-            body = response.read(_MAX_METADATA_BYTES + 1)
-        if len(body) > _MAX_METADATA_BYTES:
-            raise ResolveError("视频元信息异常过大")
-        result = json.loads(body)
-    except HTTPError as exc:
-        if exc.code in (401, 403):
-            raise ResolveError("当前匿名权限无法读取此视频") from exc
-        if exc.code in (412, 429):
-            raise ResolveError("B 站暂时限制请求，请稍后重试") from exc
-        raise ResolveError("无法读取视频元信息，请稍后重试") from exc
-    except (URLError, TimeoutError, OSError, ValueError) as exc:
-        raise ResolveError("读取视频元信息失败，请检查网络后重试") from exc
-    if not isinstance(result, dict) or result.get("code") != 0:
-        code = result.get("code") if isinstance(result, dict) else None
-        if code in (-403, -101):
-            raise ResolveError("当前匿名访问权限不足")
-        if code in (-404, 62002, 62004):
-            raise ResolveError("视频已删除或不可访问")
-        if code in (-352, -412):
-            raise ResolveError("B 站暂时限制请求，请稍后重试")
-        raise ResolveError("B 站未返回可用的视频元信息")
-    data = result.get("data")
-    if not isinstance(data, dict) or data.get("bvid") != bvid:
+        state, _ = json.JSONDecoder().raw_decode(page[marker.end():])
+    except ValueError as exc:
+        raise ResolveError("视频页面元信息无效（视频元信息解析），请更新解析组件。") from exc
+    if not isinstance(state, dict):
+        raise ResolveError("视频页面元信息结构无效。")
+    error = state.get("error")
+    code = error.get("trueCode") if isinstance(error, dict) else None
+    if code in (-403, -101):
+        raise ResolveError(f"当前匿名访问权限不足（视频元信息解析，站点代码 {code}）。")
+    if code in (-404, 62002, 62004):
+        raise ResolveError(f"视频已删除或不可访问（视频元信息解析，站点代码 {code}）。")
+    if code in (-352, -412):
+        raise ResolveError(f"B 站拒绝当前请求（视频元信息解析，站点代码 {code}），反复重试不保证恢复。")
+    if code not in (None, 0):
+        raise ResolveError("B 站页面报告了不可访问状态（视频元信息解析）。")
+    data = state.get("videoData")
+    if not isinstance(data, dict):
+        raise ResolveError("该页面不是首版支持的普通 BV 视频。")
+    # Keep only public identity and access fields; never cache playback URLs.
+    fields = (
+        "bvid", "title", "pages", "rights", "redirect_url", "is_upower_exclusive",
+        "is_live", "is_preview", "has_drm", "is_paid",
+    )
+    data = {key: data[key] for key in fields if key in data}
+    if data.get("bvid") != bvid:
         raise ResolveError("视频身份校验失败")
     if data.get("redirect_url"):
         raise ResolveError("首版不支持重定向到番剧或付费课程的视频")
-    if data.get("is_upower_exclusive"):
+    if data.get("is_upower_exclusive") or data.get("is_paid"):
         raise ResolveError("首版不支持充电专属或试看视频")
     rights = data.get("rights") or {}
     if isinstance(rights, dict) and rights.get("is_stein_gate"):
         raise ResolveError("首版不支持互动视频分支")
     if data.get("is_live") or data.get("is_preview") or data.get("has_drm"):
         raise ResolveError("首版仅支持完整、无 DRM 的普通点播视频")
+    _metadata_parts(data, bvid)
+    return data
+
+
+def _fetch_metadata(bvid: str) -> dict[str, Any]:
+    """Read the ordinary video page, avoiding the redundant view API request."""
+    if not isinstance(bvid, str) or not _BVID_RE.fullmatch(bvid):
+        raise InputError("BV 号无效")
+    now = time.monotonic()
+    with _METADATA_LOCK:
+        cached = _METADATA_CACHE.get(bvid)
+        if cached is not None and now - cached[0] < _METADATA_TTL:
+            return deepcopy(cached[1])
+    try:
+        from yt_dlp.utils.networking import std_headers
+    except ImportError as exc:
+        raise DependencyError("缺少 yt-dlp，请安装项目依赖或使用完整发布包") from exc
+    endpoint = f"https://www.bilibili.com/video/{bvid}/"
+    request = Request(endpoint, headers={
+        **std_headers, "Accept": "text/html", "Accept-Encoding": "gzip",
+        "Referer": "https://www.bilibili.com/",
+    })
+    try:
+        with urlopen(request, timeout=_TIMEOUT) as response:
+            final = urlsplit(response.geturl())
+            path = _PATH_RE.fullmatch(final.path)
+            if final.scheme != "https" or final.hostname != "www.bilibili.com" or path is None or path.group(1) != bvid:
+                raise ResolveError("视频页面重定向到了不支持的内容，停止解析。")
+            encoding = response.headers.get("Content-Encoding", "identity").lower()
+            if encoding == "gzip":
+                with gzip.GzipFile(fileobj=response) as decoded:
+                    body = decoded.read(_MAX_METADATA_BYTES + 1)
+            elif encoding in ("", "identity"):
+                body = response.read(_MAX_METADATA_BYTES + 1)
+            else:
+                raise ResolveError("视频页面使用了不支持的压缩格式，停止解析。")
+        if len(body) > _MAX_METADATA_BYTES:
+            raise ResolveError("视频页面元信息异常过大")
+        data = _metadata_from_page(body.decode("utf-8-sig"), bvid)
+    except HTTPError as exc:
+        raise _request_failure("获取视频页面", exc) from exc
+    except (URLError, TimeoutError, OSError, ValueError) as exc:
+        raise _request_failure("获取视频页面元信息", exc) from exc
+    with _METADATA_LOCK:
+        if len(_METADATA_CACHE) >= 32:
+            oldest = min(_METADATA_CACHE, key=lambda key: _METADATA_CACHE[key][0])
+            del _METADATA_CACHE[oldest]
+        _METADATA_CACHE[bvid] = (time.monotonic(), deepcopy(data))
     return data
 
 
@@ -225,39 +322,7 @@ def resolve_parts(url: str) -> list[Part]:
     """List only the parts belonging to this BV, regardless of incoming p."""
     normalized = normalize_url(url)
     bvid = _bvid(normalized)
-    base = f"https://www.bilibili.com/video/{bvid}"
-    info = _extract(base, flat=True)
-    _check_extractor(info)
-    if info.get("_type") == "multi_video":
-        raise ResolveError("首版不支持旧版分段 FLV 视频")
-    extracted_indices: set[int] | None = None
-    if info.get("_type") == "playlist":
-        extracted_indices = set()
-        for entry in info.get("entries") or []:
-            if not isinstance(entry, dict):
-                raise ResolveError("解析器返回了无效选集")
-            _check_extractor(entry)
-            try:
-                page_url = normalize_url(entry.get("url") or entry.get("webpage_url") or "")
-            except InputError as exc:
-                raise ResolveError("选集包含不支持的页面") from exc
-            if _bvid(page_url) != bvid:
-                raise ResolveError("拒绝扩大下载范围到其他 BV")
-            index = _part_index(page_url)
-            if index in extracted_indices:
-                raise ResolveError("解析器返回了重复选集")
-            extracted_indices.add(index)
-        if not extracted_indices:
-            raise ResolveError("未找到可访问的选集")
-    else:
-        extracted_id = str(info.get("id", ""))
-        if extracted_id not in {bvid, f"{bvid}_p1"}:
-            raise ResolveError("解析得到的视频身份不一致")
     parts = _metadata_parts(_fetch_metadata(bvid), bvid)
-    if extracted_indices is not None and extracted_indices != {p.index for p in parts}:
-        raise ResolveError("解析器与公开元信息的选集列表不一致，请稍后重试")
-    if extracted_indices is None and len(parts) != 1:
-        raise ResolveError("解析器未返回完整选集列表，请更新 yt-dlp 后重试")
     if _part_index(normalized) > len(parts):
         raise InputError("链接指定的分 P 不存在")
     return parts

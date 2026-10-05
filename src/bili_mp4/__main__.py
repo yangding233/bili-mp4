@@ -17,7 +17,13 @@ def main() -> int:
     try:
         from .ui import run
     except ImportError as exc:
-        sys.stderr.write(f"无法启动 Bili MP4，缺少运行依赖：{exc}\n请安装项目依赖后重试。\n")
+        message = f"无法启动 Bili MP4，缺少运行依赖：{exc}\n请安装项目依赖后重试。\n"
+        if sys.stderr is not None:
+            sys.stderr.write(message)
+        elif not args.smoke_test and sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, message, "Bili MP4 启动失败", 0x10)
         return 1
     return run(data_dir=args.data_dir, smoke_test=args.smoke_test)
 

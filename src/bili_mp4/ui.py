@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget, QHeaderView, QAbstractItemView,
 )
 
-from . import resolver
+from . import __version__, resolver
 from .engine import DownloadManager, find_tools
 from .store import TaskStore
 
@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, data_dir: Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("Bili MP4 · 下载与无损合并")
+        self.setWindowTitle(f"Bili MP4 v{__version__} · 下载与无损合并")
         self.resize(1180, 840)
         self.data_dir = Path(data_dir or default_data_dir())
         self.data_dir.mkdir(parents=True, exist_ok=True)
